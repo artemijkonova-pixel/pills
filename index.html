@@ -65,6 +65,8 @@
 
   <div class="banner" id="nokey" hidden>Нужен ключ доступа: открой личную ссылку с ключом или вставь его в «Настройки» внизу.</div>
 
+  <div class="banner" id="testbanner" hidden>🧪 Тестовый режим: кнопки работают в любое время, отметки не идут в статистику. <a href="./">Обычный режим</a></div>
+
   <div class="card slot" id="slot-morning">
     <div class="ico">☀️</div>
     <div class="txt"><div class="name">Утро · 06:00–09:00</div><div class="state"></div></div>
@@ -134,8 +136,12 @@ function addDays(iso, n) {
   const d = new Date(iso + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
+// ?test — тестовый режим: кнопки активны всегда, отметки пишутся в ключ "test" и не идут в статистику
+const TEST = new URLSearchParams(location.search).has("test");
+const dayKey = (now) => (TEST ? "test" : now.date);
 function slotStatus(log, date, slot, now) {
   const rec = (log[date] || {})[slot];
+  if (date === "test") return rec ? "done" : "open";
   if (rec) return "done";
   if (date < now.date) return "missed";
   const s = CFG.slots[slot];
@@ -158,17 +164,18 @@ async function fetchLog() {
 }
 async function mark(slot) {
   const now = nowParts();
-  if (slotStatus(LOG, now.date, slot, now) !== "open") return;
+  const key = dayKey(now);
+  if (!TEST && slotStatus(LOG, key, slot, now) !== "open") return;
   setMsg("Сохраняю…");
   for (let attempt = 0; attempt < 3; attempt++) {
     await fetchLog();
-    LOG[now.date] = { ...(LOG[now.date] || {}), [slot]: `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}` };
+    LOG[key] = { ...(LOG[key] || {}), [slot]: `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}` };
     const sorted = Object.fromEntries(Object.entries(LOG).sort());
     const r = await fetch(API, {
       method: "PUT",
       headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({
-        message: `${CFG.slots[slot].label} ${now.date} ✓`,
+        message: `${CFG.slots[slot].label} ${key} ✓`,
         content: b64encode(JSON.stringify(sorted, null, 2) + "\n"),
         sha: SHA,
       }),
@@ -187,12 +194,14 @@ function render() {
   $("today").textContent = new Intl.DateTimeFormat("ru-RU", { timeZone: CFG.tz, weekday: "long", day: "numeric", month: "long" }).format(new Date())
     + ` · ${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}`;
   $("nokey").hidden = !!TOKEN;
+  $("testbanner").hidden = !TEST;
+  const key = dayKey(now);
 
   for (const slot of Object.keys(CFG.slots)) {
-    const st = slotStatus(LOG, now.date, slot, now);
+    const st = slotStatus(LOG, key, slot, now);
     const el = $("slot-" + slot), s = CFG.slots[slot];
     el.className = "card slot " + st;
-    const t = (LOG[now.date] || {})[slot];
+    const t = (LOG[key] || {})[slot];
     el.querySelector(".state").textContent = {
       done: `Выпито в ${t} ✓`,
       open: `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
@@ -200,8 +209,8 @@ function render() {
       missed: "Пропущено",
     }[st];
     const btn = el.querySelector("button");
-    btn.hidden = st === "done";
-    btn.disabled = st !== "open" || !TOKEN;
+    btn.hidden = st === "done" && !TEST;
+    btn.disabled = (st !== "open" && !TEST) || !TOKEN;
   }
 
   // статистика
