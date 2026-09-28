@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f1ec">
+<title>Таблетки</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💊</text></svg>">
+<style>
+  :root {
+    --bg: #f6f1ec; --card: #ffffff; --ink: #2b2522; --muted: #8a7f78; --line: #eadfd6;
+    --ok: #3f9d6b; --ok-soft: #e3f3ea; --warn: #d9822b; --warn-soft: #fbeddc;
+    --bad: #c9474f; --bad-soft: #f8e1e2; --accent: #b0567a; --accent-soft: #f5e3ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1716; --card: #24201e; --ink: #f1ebe6; --muted: #a39890; --line: #37302c;
+      --ok: #5cc28c; --ok-soft: #1f3328; --warn: #eea456; --warn-soft: #3a2c1c;
+      --bad: #ea6d74; --bad-soft: #3b2224; --accent: #e58bb0; --accent-soft: #3a2530;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 460px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 26px; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 16px; margin-bottom: 12px; }
+  .slot { display: flex; align-items: center; gap: 14px; }
+  .slot .ico { font-size: 30px; width: 44px; text-align: center; }
+  .slot .txt { flex: 1; }
+  .slot .name { font-weight: 600; }
+  .slot .state { color: var(--muted); font-size: 14px; }
+  .slot.done { background: var(--ok-soft); border-color: transparent; }
+  .slot.done .state { color: var(--ok); }
+  .slot.open .state { color: var(--warn); }
+  .slot.missed { background: var(--bad-soft); border-color: transparent; }
+  .slot.missed .state { color: var(--bad); }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 12px 16px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; }
+  button:disabled { opacity: .35; cursor: default; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { text-align: center; }
+  .stat b { display: block; font-size: 28px; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 8px; }
+  .day { aspect-ratio: 1; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 12px; background: var(--line); color: var(--muted); }
+  .day .d { font-weight: 600; color: var(--ink); }
+  .day.full { background: var(--ok); } .day.full .d, .day.full { color: #fff; }
+  .day.half { background: var(--warn-soft); } .day.none { background: var(--bad-soft); }
+  .day.today { outline: 2px solid var(--accent); outline-offset: 1px; }
+  h2 { font-size: 15px; margin: 0; color: var(--muted); font-weight: 600; }
+  .msg { font-size: 14px; color: var(--muted); min-height: 20px; text-align: center; margin: 8px 0; }
+  .msg.err { color: var(--bad); }
+  details { color: var(--muted); font-size: 14px; }
+  details input { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; margin: 8px 0; }
+  .banner { background: var(--accent-soft); color: var(--ink); border-radius: 14px; padding: 12px 14px; font-size: 14px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>💊 Таблетки</h1>
+  <p class="sub" id="today">…</p>
+
+  <div class="banner" id="nokey" hidden>Нужен ключ доступа: открой личную ссылку с ключом или вставь его в «Настройки» внизу.</div>
+
+  <div class="card slot" id="slot-morning">
+    <div class="ico">☀️</div>
+    <div class="txt"><div class="name">Утро · 06:00–09:00</div><div class="state"></div></div>
+    <button data-slot="morning">Выпила</button>
+  </div>
+  <div class="card slot" id="slot-evening">
+    <div class="ico">🌙</div>
+    <div class="txt"><div class="name">Вечер · 18:00–21:00</div><div class="state"></div></div>
+    <button data-slot="evening">Выпила</button>
+  </div>
+
+  <div class="msg" id="msg"></div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><b id="streak">–</b><span>дней подряд</span></div>
+      <div class="stat"><b id="total">–</b><span>приёмов всего</span></div>
+      <div class="stat"><b id="missed">–</b><span>пропущено</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Последние 4 недели</h2>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <details>
+    <summary>Настройки</summary>
+    <p>Ключ доступа (GitHub fine-grained token) хранится только в этом браузере.</p>
+    <input id="tok" type="password" placeholder="github_pat_…" autocomplete="off">
+    <button id="save">Сохранить ключ</button>
+  </details>
+</main>
+
+<script>
+const CFG = {
+  owner: "artemijkonova-pixel",
+  repo: "personal",
+  path: "data/log.json",
+  tz: "Europe/London",
+  slots: {
+    morning: { from: 6, to: 9, label: "Утро" },
+    evening: { from: 18, to: 21, label: "Вечер" },
+  },
+  since: "2026-09-29", // дата старта — раньше пропуски не считаем
+};
+
+const $ = (id) => document.getElementById(id);
+const API = `https://api.github.com/repos/${CFG.owner}/${CFG.repo}/contents/${CFG.path}`;
+
+// --- ключ: из #token=… (один раз) или из localStorage
+function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.get("token")) { store("pill_token", hash.get("token")); history.replaceState(null, "", location.pathname); }
+let TOKEN = load("pill_token") || "";
+
+// --- время в часовом поясе CFG.tz (не зависит от настроек телефона)
+function nowParts() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: CFG.tz, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date()).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, h: +p.hour, m: +p.minute };
+}
+function addDays(iso, n) {
+  const d = new Date(iso + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function slotStatus(log, date, slot, now) {
+  const rec = (log[date] || {})[slot];
+  if (rec) return "done";
+  if (date < now.date) return "missed";
+  const s = CFG.slots[slot];
+  if (now.h < s.from) return "wait";
+  if (now.h < s.to) return "open";
+  return "missed";
+}
+
+// --- GitHub
+let LOG = {}, SHA = null;
+function b64decode(s) { return new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), (c) => c.charCodeAt(0))); }
+function b64encode(s) { return btoa(String.fromCharCode(...new TextEncoder().encode(s))); }
+async function fetchLog() {
+  const headers = { Accept: "application/vnd.github+json" };
+  if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
+  const r = await fetch(API + "?t=" + Date.now(), { headers, cache: "no-store" });
+  if (!r.ok) throw new Error("Не удалось загрузить данные (" + r.status + ")");
+  const j = await r.json();
+  SHA = j.sha; LOG = JSON.parse(b64decode(j.content) || "{}");
+}
+async function mark(slot) {
+  const now = nowParts();
+  if (slotStatus(LOG, now.date, slot, now) !== "open") return;
+  setMsg("Сохраняю…");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await fetchLog();
+    LOG[now.date] = { ...(LOG[now.date] || {}), [slot]: `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}` };
+    const sorted = Object.fromEntries(Object.entries(LOG).sort());
+    const r = await fetch(API, {
+      method: "PUT",
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        message: `${CFG.slots[slot].label} ${now.date} ✓`,
+        content: b64encode(JSON.stringify(sorted, null, 2) + "\n"),
+        sha: SHA,
+      }),
+    });
+    if (r.ok) { SHA = (await r.json()).content.sha; LOG = sorted; setMsg("Отмечено ❤️"); render(); return; }
+    if (r.status !== 409) throw new Error(r.status === 401 || r.status === 403 ? "Ключ не подходит (" + r.status + ")" : "Ошибка сохранения (" + r.status + ")");
+  }
+  throw new Error("Конфликт при сохранении, попробуй ещё раз");
+}
+
+// --- UI
+function setMsg(t, err) { $("msg").textContent = t || ""; $("msg").className = "msg" + (err ? " err" : ""); }
+const WD = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+function render() {
+  const now = nowParts();
+  $("today").textContent = new Intl.DateTimeFormat("ru-RU", { timeZone: CFG.tz, weekday: "long", day: "numeric", month: "long" }).format(new Date())
+    + ` · ${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}`;
+  $("nokey").hidden = !!TOKEN;
+
+  for (const slot of Object.keys(CFG.slots)) {
+    const st = slotStatus(LOG, now.date, slot, now);
+    const el = $("slot-" + slot), s = CFG.slots[slot];
+    el.className = "card slot " + st;
+    const t = (LOG[now.date] || {})[slot];
+    el.querySelector(".state").textContent = {
+      done: `Выпито в ${t} ✓`,
+      open: `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
+      wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
+      missed: "Пропущено",
+    }[st];
+    const btn = el.querySelector("button");
+    btn.hidden = st === "done";
+    btn.disabled = st !== "open" || !TOKEN;
+  }
+
+  // статистика
+  let total = 0, missed = 0;
+  for (let d = CFG.since; d <= now.date; d = addDays(d, 1)) {
+    for (const slot of Object.keys(CFG.slots)) {
+      const st = slotStatus(LOG, d, slot, now);
+      if (st === "done") total++; else if (st === "missed") missed++;
+    }
+  }
+  const full = (d) => Object.keys(CFG.slots).every((s) => (LOG[d] || {})[s]);
+  const todayBroken = Object.keys(CFG.slots).some((s) => slotStatus(LOG, now.date, s, now) === "missed");
+  let streak = 0, d = full(now.date) ? now.date : addDays(now.date, -1);
+  if (!todayBroken) while (d >= CFG.since && full(d)) { streak++; d = addDays(d, -1); }
+  $("streak").textContent = streak; $("total").textContent = total; $("missed").textContent = missed;
+
+  // календарь: 4 недели, пн–вс
+  const grid = $("grid"); grid.innerHTML = "";
+  const dow = (new Date(now.date + "T12:00:00Z").getUTCDay() + 6) % 7;
+  const start = addDays(now.date, -dow - 21);
+  for (let i = 0; i < 28; i++) {
+    const day = addDays(start, i), cell = document.createElement("div");
+    const n = Object.keys(CFG.slots).filter((s) => (LOG[day] || {})[s]).length;
+    let cls = "day";
+    if (day <= now.date && day >= CFG.since) {
+      const anyMissed = Object.keys(CFG.slots).some((s) => slotStatus(LOG, day, s, now) === "missed");
+      cls += n === 2 ? " full" : anyMissed ? (n ? " half" : " none") : n ? " half" : "";
+    }
+    if (day === now.date) cls += " today";
+    cell.className = cls;
+    cell.innerHTML = `<span class="d">${+day.slice(8)}</span><span>${WD[new Date(day + "T12:00:00Z").getUTCDay()]}</span>`;
+    cell.title = day + (n ? ` — ${n}/2` : "");
+    grid.appendChild(cell);
+  }
+}
+
+document.querySelectorAll("button[data-slot]").forEach((b) =>
+  b.addEventListener("click", () => mark(b.dataset.slot).catch((e) => setMsg(e.message, true))));
+$("save").addEventListener("click", () => {
+  TOKEN = $("tok").value.trim(); store("pill_token", TOKEN); $("tok").value = "";
+  setMsg(TOKEN ? "Ключ сохранён" : "Ключ удалён"); render();
+});
+
+async function refresh() {
+  try { await fetchLog(); setMsg(""); } catch (e) { setMsg(e.message, true); }
+  render();
+}
+refresh();
+setInterval(render, 30_000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>
