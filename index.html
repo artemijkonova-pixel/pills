@@ -246,6 +246,7 @@ $("save").addEventListener("click", () => {
 });
 
 async function refresh() {
+  if (!TOKEN) { render(); return; }
   try { await fetchLog(); setMsg(""); } catch (e) { setMsg(e.message, true); }
   render();
 }
