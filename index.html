@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f6f1ec">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Таблетки">
 <title>Таблетки</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💊</text></svg>">
 <style>
@@ -141,7 +143,7 @@ const API = `https://api.github.com/repos/${CFG.owner}/${CFG.repo}/contents/${CF
 function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 const hash = new URLSearchParams(location.hash.slice(1));
-if (hash.get("token")) { store("pill_token", hash.get("token")); history.replaceState(null, "", location.pathname); }
+if (hash.get("token")) { store("pill_token", hash.get("token")); history.replaceState(null, "", location.pathname + location.search); }
 let TOKEN = load("pill_token") || "";
 
 // --- время в часовом поясе CFG.tz (не зависит от настроек телефона)
@@ -171,24 +173,31 @@ function slotStatus(log, date, slot, now) {
 }
 
 // --- GitHub
-let LOG = {}, SHA = null;
+let LOG = {}, SHA = null, LOADED = false, SAVING = false;
 function b64decode(s) { return new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), (c) => c.charCodeAt(0))); }
-function b64encode(s) { return btoa(String.fromCharCode(...new TextEncoder().encode(s))); }
+function b64encode(s) {
+  const b = new TextEncoder().encode(s); let bin = "";
+  for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 async function fetchLog() {
   const headers = { Accept: "application/vnd.github+json" };
   if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
   const r = await fetch(API + "?t=" + Date.now(), { headers, cache: "no-store" });
-  if (!r.ok) throw new Error("Не удалось загрузить данные (" + r.status + ")");
+  if (r.status === 401 || r.status === 404) throw new Error("Ключ не подходит или истёк — вставь новый в «Настройках»");
+  if (!r.ok) throw new Error("Не удалось загрузить данные (" + r.status + "), проверь интернет");
   const j = await r.json();
-  SHA = j.sha; LOG = JSON.parse(b64decode(j.content) || "{}");
+  SHA = j.sha; LOG = JSON.parse(b64decode(j.content) || "{}"); LOADED = true;
 }
 async function mark(slot) {
   const now = nowParts();
   const key = dayKey(now);
-  if (!TEST && slotStatus(LOG, key, slot, now) !== "open") return;
-  setMsg("Сохраняю…");
+  if (SAVING || (!TEST && slotStatus(LOG, key, slot, now) !== "open")) return;
+  SAVING = true; render(); setMsg("Сохраняю…");
+  try {
   for (let attempt = 0; attempt < 3; attempt++) {
     await fetchLog();
+    if (!TEST && (LOG[key] || {})[slot]) { setMsg("Уже отмечено ❤️"); return; }
     LOG[key] = { ...(LOG[key] || {}), [slot]: `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}` };
     const sorted = Object.fromEntries(Object.entries(LOG).sort());
     const r = await fetch(API, {
@@ -201,9 +210,10 @@ async function mark(slot) {
       }),
     });
     if (r.ok) { SHA = (await r.json()).content.sha; LOG = sorted; setMsg("Отмечено ❤️"); render(); return; }
-    if (r.status !== 409) throw new Error(r.status === 401 || r.status === 403 ? "Ключ не подходит (" + r.status + ")" : "Ошибка сохранения (" + r.status + ")");
+    if (r.status !== 409) throw new Error(r.status === 401 || r.status === 403 || r.status === 404 ? "Ключ не подходит или нет прав на запись (" + r.status + ")" : "Ошибка сохранения (" + r.status + ")");
   }
   throw new Error("Конфликт при сохранении, попробуй ещё раз");
+  } finally { SAVING = false; render(); }
 }
 
 // --- UI
@@ -219,17 +229,18 @@ function render() {
   for (const slot of Object.keys(CFG.slots)) {
     const st = slotStatus(LOG, key, slot, now);
     const el = $("slot-" + slot), s = CFG.slots[slot];
-    el.className = "card slot " + st;
+    el.className = "card slot " + (LOADED ? st : "");
     const t = (LOG[key] || {})[slot];
     el.querySelector(".state").textContent = {
       done: `Выпито в ${t} ✓`,
-      open: `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
+      open: TEST ? "Тест: можно нажать" : `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
       wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
       missed: "Пропущено",
     }[st];
+    if (!LOADED) el.querySelector(".state").textContent = TOKEN ? "Загрузка…" : "Нужен ключ";
     const btn = el.querySelector("button");
     btn.hidden = st === "done" && !TEST;
-    btn.disabled = (st !== "open" && !TEST) || !TOKEN;
+    btn.disabled = (st !== "open" && !TEST) || !TOKEN || !LOADED || SAVING;
   }
 
   // статистика
@@ -244,7 +255,7 @@ function render() {
   const todayBroken = Object.keys(CFG.slots).some((s) => slotStatus(LOG, now.date, s, now) === "missed");
   let streak = 0, d = full(now.date) ? now.date : addDays(now.date, -1);
   if (!todayBroken) while (d >= CFG.since && full(d)) { streak++; d = addDays(d, -1); }
-  $("streak").textContent = streak; $("total").textContent = total; $("missed").textContent = missed;
+  $("streak").textContent = LOADED ? streak : "–"; $("total").textContent = LOADED ? total : "–"; $("missed").textContent = LOADED ? missed : "–";
 
   renderCalendar(now);
 }
@@ -281,7 +292,7 @@ function renderCalendar(now) {
 
   let taken = 0, missed = 0, full = 0;
   for (let i = 1; i <= days; i++) {
-    const day = `${VIEW}-${String(i).padStart(2, "0")}`, info = dayInfo(day, now);
+    const day = `${VIEW}-${String(i).padStart(2, "0")}`, info = LOADED ? dayInfo(day, now) : null;
     const cell = document.createElement("button");
     cell.className = "day " + (info ? info.cls : "off") + (day === now.date ? " today" : "") + (day === SEL ? " sel" : "");
     cell.innerHTML = `<span>${i}</span>` + (info ? `<span class="dots">${info.st.map((x) => `<i class="dot ${x}"></i>`).join("")}</span>` : "");
@@ -291,7 +302,7 @@ function renderCalendar(now) {
     } else cell.disabled = true;
     grid.appendChild(cell);
   }
-  $("monthsum").innerHTML = taken + missed
+  $("monthsum").innerHTML = !LOADED ? "" : taken + missed
     ? `За месяц: выпито <b>${taken}</b> · пропущено <b>${missed}</b> · полных дней <b>${full}</b>`
     : "За этот месяц пока нет данных";
 
@@ -312,7 +323,7 @@ document.querySelectorAll("button[data-slot]").forEach((b) =>
   b.addEventListener("click", () => mark(b.dataset.slot).catch((e) => setMsg(e.message, true))));
 $("save").addEventListener("click", () => {
   TOKEN = $("tok").value.trim(); store("pill_token", TOKEN); $("tok").value = "";
-  setMsg(TOKEN ? "Ключ сохранён" : "Ключ удалён"); render();
+  setMsg(TOKEN ? "Ключ сохранён" : "Ключ удалён"); LOADED = false; LOG = {}; refresh();
 });
 
 async function refresh() {
@@ -322,6 +333,7 @@ async function refresh() {
 }
 refresh();
 setInterval(render, 30_000);
+setInterval(() => { if (!document.hidden && !SAVING) refresh(); }, 5 * 60_000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
 </body>
