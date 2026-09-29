@@ -37,6 +37,8 @@
   .slot.done .state { color: var(--ok); }
   .slot.open .state { color: var(--warn); }
   .slot.missed { background: var(--bad-soft); border-color: transparent; }
+  .slot.late { background: var(--warn-soft); border-color: transparent; }
+  .slot.late .state { color: var(--warn); }
   .slot.missed .state { color: var(--bad); }
   button { font: inherit; border: 0; border-radius: 12px; padding: 12px 16px; font-weight: 600; cursor: pointer;
     background: var(--accent); color: #fff; }
@@ -61,6 +63,8 @@
   .dots { display: flex; gap: 3px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .35; }
   .dot.done { background: var(--ok); opacity: 1; } .dot.missed { background: var(--bad); opacity: 1; }
+  .dot.late { background: var(--warn); opacity: 1; }
+  .detail button { margin-top: 8px; padding: 8px 12px; font-size: 14px; }
   .legend { display: flex; gap: 14px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 10px; }
   .legend .dot { display: inline-block; vertical-align: middle; margin-right: 4px; }
   .month-sum { text-align: center; font-size: 14px; margin-top: 10px; }
@@ -110,7 +114,7 @@
       <button id="next" aria-label="Следующий месяц">›</button>
     </div>
     <div class="grid" id="grid"></div>
-    <div class="legend"><span><i class="dot done"></i>выпила</span><span><i class="dot missed"></i>пропуск</span><span><i class="dot"></i>ещё не время</span></div>
+    <div class="legend"><span><i class="dot done"></i>выпила</span><span><i class="dot late"></i>поздно</span><span><i class="dot missed"></i>пропуск</span><span><i class="dot"></i>ещё не время</span></div>
     <div class="month-sum" id="monthsum"></div>
     <div class="detail" id="detail">Нажми на день, чтобы увидеть время приёма</div>
   </div>
@@ -164,7 +168,7 @@ const dayKey = (now) => (TEST ? "test" : now.date);
 function slotStatus(log, date, slot, now) {
   const rec = (log[date] || {})[slot];
   if (date === "test") return rec ? "done" : "open";
-  if (rec) return "done";
+  if (rec) return (log[date] || {})[slot + "_late"] ? "late" : "done";
   if (date < now.date) return "missed";
   const s = CFG.slots[slot];
   if (now.h < s.from) return "wait";
@@ -189,22 +193,29 @@ async function fetchLog() {
   const j = await r.json();
   SHA = j.sha; LOG = JSON.parse(b64decode(j.content) || "{}"); LOADED = true;
 }
-async function mark(slot) {
+// поздняя отметка: только за сегодня и вчера, фиксируем реальное время нажатия
+const LATE_DAYS = 1;
+function canMarkLate(day, slot, now) {
+  return !!TOKEN && LOADED && day >= addDays(now.date, -LATE_DAYS) && day >= CFG.since && slotStatus(LOG, day, slot, now) === "missed";
+}
+async function mark(slot, lateDay) {
   const now = nowParts();
-  const key = dayKey(now);
-  if (SAVING || (!TEST && slotStatus(LOG, key, slot, now) !== "open")) return;
+  const key = lateDay || dayKey(now);
+  if (SAVING) return;
+  if (lateDay ? !canMarkLate(lateDay, slot, now) : !TEST && slotStatus(LOG, key, slot, now) !== "open") return;
   SAVING = true; render(); setMsg("Сохраняю…");
   try {
   for (let attempt = 0; attempt < 3; attempt++) {
     await fetchLog();
     if (!TEST && (LOG[key] || {})[slot]) { setMsg("Уже отмечено ❤️"); return; }
-    LOG[key] = { ...(LOG[key] || {}), [slot]: `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}` };
+    const hm = `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}`;
+    LOG[key] = { ...(LOG[key] || {}), [slot]: hm, ...(lateDay ? { [slot + "_late"]: `${now.date} ${hm}` } : {}) };
     const sorted = Object.fromEntries(Object.entries(LOG).sort());
     const r = await fetch(API, {
       method: "PUT",
       headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({
-        message: `${CFG.slots[slot].label} ${key} ✓`,
+        message: `${CFG.slots[slot].label} ${key} ✓${lateDay ? " (поздно)" : ""}`,
         content: b64encode(JSON.stringify(sorted, null, 2) + "\n"),
         sha: SHA,
       }),
@@ -233,13 +244,14 @@ function render() {
     const t = (LOG[key] || {})[slot];
     el.querySelector(".state").textContent = {
       done: `Выпито в ${t} ✓`,
+      late: `Отмечено поздно, в ${t}`,
       open: TEST ? "Тест: можно нажать" : `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
       wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
       missed: "Пропущено",
     }[st];
     if (!LOADED) el.querySelector(".state").textContent = TOKEN ? "Загрузка…" : "Нужен ключ";
     const btn = el.querySelector("button");
-    btn.hidden = st === "done" && !TEST;
+    btn.hidden = (st === "done" || st === "late") && !TEST;
     btn.disabled = (st !== "open" && !TEST) || !TOKEN || !LOADED || SAVING;
   }
 
@@ -248,11 +260,12 @@ function render() {
   for (let d = CFG.since; d <= now.date; d = addDays(d, 1)) {
     for (const slot of Object.keys(CFG.slots)) {
       const st = slotStatus(LOG, d, slot, now);
-      if (st === "done") total++; else if (st === "missed") missed++;
+      if (st === "done" || st === "late") total++; else if (st === "missed") missed++;
     }
   }
-  const full = (d) => Object.keys(CFG.slots).every((s) => (LOG[d] || {})[s]);
-  const todayBroken = Object.keys(CFG.slots).some((s) => slotStatus(LOG, now.date, s, now) === "missed");
+  // серия — только дни, где всё выпито вовремя
+  const full = (d) => Object.keys(CFG.slots).every((s) => slotStatus(LOG, d, s, now) === "done");
+  const todayBroken = Object.keys(CFG.slots).some((s) => ["missed", "late"].includes(slotStatus(LOG, now.date, s, now)));
   let streak = 0, d = full(now.date) ? now.date : addDays(now.date, -1);
   if (!todayBroken) while (d >= CFG.since && full(d)) { streak++; d = addDays(d, -1); }
   $("streak").textContent = LOADED ? streak : "–"; $("total").textContent = LOADED ? total : "–"; $("missed").textContent = LOADED ? missed : "–";
@@ -272,8 +285,9 @@ function shiftMonth(ym, n) {
 function dayInfo(day, now) {
   if (day < CFG.since || day > now.date) return null;
   const st = Object.keys(CFG.slots).map((s) => slotStatus(LOG, day, s, now));
-  const done = st.filter((x) => x === "done").length, missed = st.filter((x) => x === "missed").length;
-  return { st, done, missed, cls: done === st.length ? "full" : missed ? (done ? "part" : "none") : done ? "part" : "" };
+  const ontime = st.filter((x) => x === "done").length, late = st.filter((x) => x === "late").length;
+  const done = ontime + late, missed = st.filter((x) => x === "missed").length;
+  return { st, done, late, missed, cls: ontime === st.length ? "full" : missed && !done ? "none" : done || missed ? "part" : "" };
 }
 function renderCalendar(now) {
   const cur = now.date.slice(0, 7);
@@ -290,30 +304,38 @@ function renderCalendar(now) {
   const pad = (new Date(first + "T12:00:00Z").getUTCDay() + 6) % 7;
   for (let i = 0; i < pad; i++) grid.insertAdjacentHTML("beforeend", "<div></div>");
 
-  let taken = 0, missed = 0, full = 0;
+  let taken = 0, late = 0, missed = 0, full = 0;
   for (let i = 1; i <= days; i++) {
     const day = `${VIEW}-${String(i).padStart(2, "0")}`, info = LOADED ? dayInfo(day, now) : null;
     const cell = document.createElement("button");
     cell.className = "day " + (info ? info.cls : "off") + (day === now.date ? " today" : "") + (day === SEL ? " sel" : "");
     cell.innerHTML = `<span>${i}</span>` + (info ? `<span class="dots">${info.st.map((x) => `<i class="dot ${x}"></i>`).join("")}</span>` : "");
     if (info) {
-      taken += info.done; missed += info.missed; if (info.cls === "full") full++;
+      taken += info.done; late += info.late; missed += info.missed; if (info.cls === "full") full++;
       cell.addEventListener("click", () => { SEL = day; render(); });
     } else cell.disabled = true;
     grid.appendChild(cell);
   }
   $("monthsum").innerHTML = !LOADED ? "" : taken + missed
-    ? `За месяц: выпито <b>${taken}</b> · пропущено <b>${missed}</b> · полных дней <b>${full}</b>`
+    ? `За месяц: выпито <b>${taken}</b>${late ? ` (из них поздно <b>${late}</b>)` : ""} · пропущено <b>${missed}</b> · полных дней <b>${full}</b>`
     : "За этот месяц пока нет данных";
 
   if (SEL) {
     const info = dayInfo(SEL, now), rec = LOG[SEL] || {};
+    const fmt = (v) => { const [d, t] = String(v).split(" "); return d === SEL ? t : `${+d.slice(8)} ${MONTHS_GEN[+d.slice(5, 7) - 1]} в ${t}`; };
     const txt = Object.entries(CFG.slots).map(([slot, s], i) => {
       const st = info ? info.st[i] : "";
       return `${slot === "morning" ? "☀️" : "🌙"} ${s.label}: ` +
-        (st === "done" ? `выпито в ${rec[slot]} ✓` : st === "missed" ? "пропущено ✗" : st === "open" ? "окно открыто" : "ещё не время");
+        (st === "done" ? `выпито в ${rec[slot]} ✓` : st === "late" ? `отмечено поздно (${fmt(rec[slot + "_late"])})` :
+         st === "missed" ? "пропущено ✗" : st === "open" ? "окно открыто" : "ещё не время") +
+        (canMarkLate(SEL, slot, now) && !SAVING ? `<br><button data-late="${slot}">Выпила, но забыла отметить</button>` : "");
     }).join("<br>");
     $("detail").innerHTML = `<b>${+SEL.slice(8)} ${MONTHS_GEN[+SEL.slice(5, 7) - 1]}</b><br>${txt}`;
+    $("detail").querySelectorAll("button[data-late]").forEach((b) => b.addEventListener("click", () => {
+      const s = CFG.slots[b.dataset.late];
+      if (confirm(`Отметить «${s.label}» за ${+SEL.slice(8)} ${MONTHS_GEN[+SEL.slice(5, 7) - 1]} как выпитое с опозданием?`))
+        mark(b.dataset.late, SEL).catch((e) => setMsg(e.message, true));
+    }));
   }
 }
 $("prev").addEventListener("click", () => { VIEW = shiftMonth(VIEW, -1); render(); });
