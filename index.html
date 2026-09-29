@@ -43,13 +43,26 @@
   .stat { text-align: center; }
   .stat b { display: block; font-size: 28px; }
   .stat span { color: var(--muted); font-size: 13px; }
-  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 8px; }
-  .day { aspect-ratio: 1; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    font-size: 12px; background: var(--line); color: var(--muted); }
-  .day .d { font-weight: 600; color: var(--ink); }
-  .day.full { background: var(--ok); } .day.full .d, .day.full { color: #fff; }
-  .day.half { background: var(--warn-soft); } .day.none { background: var(--bad-soft); }
+  .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .cal-head b { font-size: 17px; text-transform: capitalize; }
+  .cal-head button { background: var(--accent-soft); color: var(--ink); padding: 6px 14px; font-size: 18px; line-height: 1; }
+  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+  .wd { text-align: center; font-size: 12px; color: var(--muted); padding-bottom: 2px; }
+  .day { aspect-ratio: 1; border-radius: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font-size: 13px; font-weight: 600; background: var(--line); color: var(--ink); cursor: pointer; border: 0; padding: 0; }
+  .day.off { background: transparent; color: var(--muted); font-weight: 400; cursor: default; opacity: .5; }
+  .day.full { background: var(--ok-soft); }
+  .day.part { background: var(--warn-soft); }
+  .day.none { background: var(--bad-soft); }
   .day.today { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .day.sel { box-shadow: inset 0 0 0 2px var(--ink); }
+  .dots { display: flex; gap: 3px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .35; }
+  .dot.done { background: var(--ok); opacity: 1; } .dot.missed { background: var(--bad); opacity: 1; }
+  .legend { display: flex; gap: 14px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .legend .dot { display: inline-block; vertical-align: middle; margin-right: 4px; }
+  .month-sum { text-align: center; font-size: 14px; margin-top: 10px; }
+  .detail { font-size: 14px; margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: var(--bg); min-height: 20px; }
   h2 { font-size: 15px; margin: 0; color: var(--muted); font-weight: 600; }
   .msg { font-size: 14px; color: var(--muted); min-height: 20px; text-align: center; margin: 8px 0; }
   .msg.err { color: var(--bad); }
@@ -89,8 +102,15 @@
   </div>
 
   <div class="card">
-    <h2>Последние 4 недели</h2>
+    <div class="cal-head">
+      <button id="prev" aria-label="Предыдущий месяц">‹</button>
+      <b id="month"></b>
+      <button id="next" aria-label="Следующий месяц">›</button>
+    </div>
     <div class="grid" id="grid"></div>
+    <div class="legend"><span><i class="dot done"></i>выпила</span><span><i class="dot missed"></i>пропуск</span><span><i class="dot"></i>ещё не время</span></div>
+    <div class="month-sum" id="monthsum"></div>
+    <div class="detail" id="detail">Нажми на день, чтобы увидеть время приёма</div>
   </div>
 
   <details>
@@ -188,7 +208,6 @@ async function mark(slot) {
 
 // --- UI
 function setMsg(t, err) { $("msg").textContent = t || ""; $("msg").className = "msg" + (err ? " err" : ""); }
-const WD = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
 function render() {
   const now = nowParts();
   $("today").textContent = new Intl.DateTimeFormat("ru-RU", { timeZone: CFG.tz, weekday: "long", day: "numeric", month: "long" }).format(new Date())
@@ -227,25 +246,67 @@ function render() {
   if (!todayBroken) while (d >= CFG.since && full(d)) { streak++; d = addDays(d, -1); }
   $("streak").textContent = streak; $("total").textContent = total; $("missed").textContent = missed;
 
-  // календарь: 4 недели, пн–вс
+  renderCalendar(now);
+}
+
+// --- календарь по месяцам: от месяца старта до текущего
+let VIEW = null, SEL = null; // VIEW = "YYYY-MM"
+const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const firstMonth = () => CFG.since.slice(0, 7);
+function shiftMonth(ym, n) {
+  const [y, m] = ym.split("-").map(Number), t = y * 12 + (m - 1) + n;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`;
+}
+function dayInfo(day, now) {
+  if (day < CFG.since || day > now.date) return null;
+  const st = Object.keys(CFG.slots).map((s) => slotStatus(LOG, day, s, now));
+  const done = st.filter((x) => x === "done").length, missed = st.filter((x) => x === "missed").length;
+  return { st, done, missed, cls: done === st.length ? "full" : missed ? (done ? "part" : "none") : done ? "part" : "" };
+}
+function renderCalendar(now) {
+  const cur = now.date.slice(0, 7);
+  if (!VIEW || VIEW > cur) VIEW = cur;
+  if (VIEW < firstMonth()) VIEW = firstMonth();
+  const [y, m] = VIEW.split("-").map(Number);
+  $("month").textContent = `${MONTHS[m - 1]} ${y}`;
+  $("prev").disabled = VIEW <= firstMonth();
+  $("next").disabled = VIEW >= cur;
+
   const grid = $("grid"); grid.innerHTML = "";
-  const dow = (new Date(now.date + "T12:00:00Z").getUTCDay() + 6) % 7;
-  const start = addDays(now.date, -dow - 21);
-  for (let i = 0; i < 28; i++) {
-    const day = addDays(start, i), cell = document.createElement("div");
-    const n = Object.keys(CFG.slots).filter((s) => (LOG[day] || {})[s]).length;
-    let cls = "day";
-    if (day <= now.date && day >= CFG.since) {
-      const anyMissed = Object.keys(CFG.slots).some((s) => slotStatus(LOG, day, s, now) === "missed");
-      cls += n === 2 ? " full" : anyMissed ? (n ? " half" : " none") : n ? " half" : "";
-    }
-    if (day === now.date) cls += " today";
-    cell.className = cls;
-    cell.innerHTML = `<span class="d">${+day.slice(8)}</span><span>${WD[new Date(day + "T12:00:00Z").getUTCDay()]}</span>`;
-    cell.title = day + (n ? ` — ${n}/2` : "");
+  for (const w of ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]) grid.insertAdjacentHTML("beforeend", `<div class="wd">${w}</div>`);
+  const first = `${VIEW}-01`, days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const pad = (new Date(first + "T12:00:00Z").getUTCDay() + 6) % 7;
+  for (let i = 0; i < pad; i++) grid.insertAdjacentHTML("beforeend", "<div></div>");
+
+  let taken = 0, missed = 0, full = 0;
+  for (let i = 1; i <= days; i++) {
+    const day = `${VIEW}-${String(i).padStart(2, "0")}`, info = dayInfo(day, now);
+    const cell = document.createElement("button");
+    cell.className = "day " + (info ? info.cls : "off") + (day === now.date ? " today" : "") + (day === SEL ? " sel" : "");
+    cell.innerHTML = `<span>${i}</span>` + (info ? `<span class="dots">${info.st.map((x) => `<i class="dot ${x}"></i>`).join("")}</span>` : "");
+    if (info) {
+      taken += info.done; missed += info.missed; if (info.cls === "full") full++;
+      cell.addEventListener("click", () => { SEL = day; render(); });
+    } else cell.disabled = true;
     grid.appendChild(cell);
   }
+  $("monthsum").innerHTML = taken + missed
+    ? `За месяц: выпито <b>${taken}</b> · пропущено <b>${missed}</b> · полных дней <b>${full}</b>`
+    : "За этот месяц пока нет данных";
+
+  if (SEL) {
+    const info = dayInfo(SEL, now), rec = LOG[SEL] || {};
+    const txt = Object.entries(CFG.slots).map(([slot, s], i) => {
+      const st = info ? info.st[i] : "";
+      return `${slot === "morning" ? "☀️" : "🌙"} ${s.label}: ` +
+        (st === "done" ? `выпито в ${rec[slot]} ✓` : st === "missed" ? "пропущено ✗" : st === "open" ? "окно открыто" : "ещё не время");
+    }).join("<br>");
+    $("detail").innerHTML = `<b>${+SEL.slice(8)} ${MONTHS_GEN[+SEL.slice(5, 7) - 1]}</b><br>${txt}`;
+  }
 }
+$("prev").addEventListener("click", () => { VIEW = shiftMonth(VIEW, -1); render(); });
+$("next").addEventListener("click", () => { VIEW = shiftMonth(VIEW, 1); render(); });
 
 document.querySelectorAll("button[data-slot]").forEach((b) =>
   b.addEventListener("click", () => mark(b.dataset.slot).catch((e) => setMsg(e.message, true))));
