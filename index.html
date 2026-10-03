@@ -247,8 +247,8 @@ async function mark(slot) {
   }, `${CFG.slots[slot].label} ${key} ✓`, "Отмечено ❤️");
 }
 
-// выпила позже: запрос (только за сегодня и вчера) -> проверяющий подтверждает или отклоняет
-const LATE_DAYS = 1;
+// выпила позже: запрос (только за сегодняшний день) -> проверяющий подтверждает или отклоняет
+const LATE_DAYS = 0; // только за сегодня
 function canRequestLate(day, slot, now) {
   return !!TOKEN && LOADED && day >= addDays(now.date, -LATE_DAYS) && day >= CFG.since && slotStatus(LOG, day, slot, now) === "missed";
 }
