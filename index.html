@@ -247,10 +247,15 @@ async function mark(slot) {
   }, `${CFG.slots[slot].label} ${key} ✓`, "Отмечено ❤️");
 }
 
-// выпила позже: запрос (только за сегодняшний день) -> проверяющий подтверждает или отклоняет
-const LATE_DAYS = 0; // только за сегодня
+// выпила позже: кнопка доступна LATE_HOURS часов после закрытия окна -> проверяющий подтверждает или отклоняет
+const LATE_HOURS = 5; // утро: до 14:00, вечер: до 02:00 ночи
+const dayNum = (iso) => Date.parse(iso + "T00:00:00Z") / 864e5;
+function lateMinutesLeft(day, slot, now) {
+  const since = (dayNum(now.date) - dayNum(day)) * 1440 + now.h * 60 + now.m - CFG.slots[slot].to * 60;
+  return since >= 0 && since < LATE_HOURS * 60 ? LATE_HOURS * 60 - since : 0;
+}
 function canRequestLate(day, slot, now) {
-  return !!TOKEN && LOADED && day >= addDays(now.date, -LATE_DAYS) && day >= CFG.since && slotStatus(LOG, day, slot, now) === "missed";
+  return !!TOKEN && LOADED && day >= CFG.since && day !== "test" && lateMinutesLeft(day, slot, now) > 0 && slotStatus(LOG, day, slot, now) === "missed";
 }
 async function requestLate(day, slot) {
   const now = nowParts(), s = CFG.slots[slot];
@@ -324,7 +329,7 @@ function render() {
       late: `Отмечено поздно, в ${t}`,
       open: TEST ? "Тест: можно нажать" : `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
       wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
-      missed: "Пропущено",
+      missed: lateMinutesLeft(key, slot, now) ? `Пропущено — «выпила позже» можно до ${String((s.to + LATE_HOURS) % 24).padStart(2, "0")}:00` : "Пропущено",
       pending: `Выпила позже (в ${((LOG[key] || {})[slot + "_req"] || {}).took}) — ждёт подтверждения`,
     }[st];
     if (!LOADED) el.querySelector(".state").textContent = TOKEN ? "Загрузка…" : "Нужен ключ";
@@ -338,11 +343,18 @@ function render() {
   // запросы «выпила позже»
   const reqs = [];
   for (const [d, rec] of Object.entries(LOG)) for (const slot of Object.keys(CFG.slots)) if (d !== "test" && rec[slot + "_req"]) reqs.push([d, slot, rec[slot + "_req"]]);
-  $("requests").hidden = !LOADED || !reqs.length;
+  // вчерашний вечер после полуночи — на карточках его уже нет, показываем кнопку здесь
+  const y = addDays(now.date, -1), lateY = Object.keys(CFG.slots).filter((sl) => canRequestLate(y, sl, now));
+  $("requests").hidden = !LOADED || (!reqs.length && !lateY.length);
   $("reqtitle").textContent = ADMIN ? "Нужно подтвердить" : "Ждут подтверждения";
   $("reqlist").innerHTML = reqs.map(([d, slot, r]) => `<div class="req"><span class="who">${slot === "morning" ? "☀️" : "🌙"} <b>${CFG.slots[slot].label}, ${fmtDay(d)}</b> — выпила позже, запрос <b>${r.at.slice(0, 10) === d ? "в " + r.at.slice(11) : fmtDay(r.at.slice(0, 10)) + " в " + r.at.slice(11)}</b></span>` +
-    (ADMIN ? `<button data-ok="${d}|${slot}">✓ Подтвердить</button><button class="no" data-no="${d}|${slot}">Отклонить</button>` : "") + `</div>`).join("");
-  $("reqlist").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    (ADMIN ? `<button data-ok="${d}|${slot}">✓ Подтвердить</button><button class="no" data-no="${d}|${slot}">Отклонить</button>` : "") + `</div>`).join("") +
+    lateY.map((sl) => `<div class="req"><span class="who">${sl === "morning" ? "☀️" : "🌙"} <b>${CFG.slots[sl].label}, ${fmtDay(y)}</b> — пропущено</span><button data-req="${y}|${sl}">Выпила позже</button></div>`).join("");
+  if (!reqs.length && lateY.length) $("reqtitle").textContent = "Пропущено";
+  $("reqlist").querySelectorAll("button[data-req]").forEach((b) => b.addEventListener("click", () => {
+    const [d, slot] = b.dataset.req.split("|"); requestLate(d, slot).catch((e) => setMsg(e.message, true));
+  }));
+  $("reqlist").querySelectorAll("button[data-ok], button[data-no]").forEach((b) => b.addEventListener("click", () => {
     const [d, slot] = (b.dataset.ok || b.dataset.no).split("|");
     review(d, slot, !!b.dataset.ok).catch((e) => setMsg(e.message, true));
   }));
