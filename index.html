@@ -255,16 +255,13 @@ function canRequestLate(day, slot, now) {
 async function requestLate(day, slot) {
   const now = nowParts(), s = CFG.slots[slot];
   if (!canRequestLate(day, slot, now)) return;
-  let took = prompt(`Во сколько ты выпила ${s.label === "Утро" ? "утренние" : "вечерние"} таблетки ${fmtDay(day)}? (ЧЧ:ММ)`, hhmm(now));
-  if (took === null) return;
-  took = took.trim().replace(/[.\-]/g, ":");
-  if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(took)) { setMsg("Время нужно в формате ЧЧ:ММ, например 21:40", true); return; }
-  took = took.padStart(5, "0");
+  if (!confirm(`Отправить запрос: ${s.label === "Утро" ? "утренние" : "вечерние"} таблетки за ${fmtDay(day)} выпиты позже? Время запроса: ${hhmm(now)}.`)) return;
+  const took = hhmm(now); // время приёма = время запроса
   await save(day, (rec) => {
     if (rec[slot]) return "Уже отмечено";
     rec[slot + "_req"] = { took, at: `${now.date} ${hhmm(now)}` };
     delete rec[slot + "_rej"];
-  }, `Запрос: ${s.label} ${day} выпито в ${took}`, "Запрос отправлен — ждём подтверждения 🙏");
+  }, `Запрос: ${s.label} ${day} выпито позже (${now.date} ${took})`, "Запрос отправлен — ждём подтверждения 🙏");
 }
 async function review(day, slot, approve) {
   const now = nowParts(), s = CFG.slots[slot];
@@ -328,7 +325,7 @@ function render() {
       open: TEST ? "Тест: можно нажать" : `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
       wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
       missed: "Пропущено",
-      pending: `Выпила в ${((LOG[key] || {})[slot + "_req"] || {}).took} — ждёт подтверждения`,
+      pending: `Выпила позже (в ${((LOG[key] || {})[slot + "_req"] || {}).took}) — ждёт подтверждения`,
     }[st];
     if (!LOADED) el.querySelector(".state").textContent = TOKEN ? "Загрузка…" : "Нужен ключ";
     const btn = el.querySelector("button");
@@ -343,7 +340,7 @@ function render() {
   for (const [d, rec] of Object.entries(LOG)) for (const slot of Object.keys(CFG.slots)) if (d !== "test" && rec[slot + "_req"]) reqs.push([d, slot, rec[slot + "_req"]]);
   $("requests").hidden = !LOADED || !reqs.length;
   $("reqtitle").textContent = ADMIN ? "Нужно подтвердить" : "Ждут подтверждения";
-  $("reqlist").innerHTML = reqs.map(([d, slot, r]) => `<div class="req"><span class="who">${slot === "morning" ? "☀️" : "🌙"} <b>${CFG.slots[slot].label}, ${fmtDay(d)}</b> — выпила в <b>${r.took}</b> (запрос ${r.at.slice(0, 10) === d ? "в " + r.at.slice(11) : r.at.slice(11) + ", " + fmtDay(r.at.slice(0, 10))})</span>` +
+  $("reqlist").innerHTML = reqs.map(([d, slot, r]) => `<div class="req"><span class="who">${slot === "morning" ? "☀️" : "🌙"} <b>${CFG.slots[slot].label}, ${fmtDay(d)}</b> — выпила позже, запрос <b>${r.at.slice(0, 10) === d ? "в " + r.at.slice(11) : fmtDay(r.at.slice(0, 10)) + " в " + r.at.slice(11)}</b></span>` +
     (ADMIN ? `<button data-ok="${d}|${slot}">✓ Подтвердить</button><button class="no" data-no="${d}|${slot}">Отклонить</button>` : "") + `</div>`).join("");
   $("reqlist").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
     const [d, slot] = (b.dataset.ok || b.dataset.no).split("|");
@@ -425,9 +422,9 @@ function renderCalendar(now) {
       const req = rec[slot + "_req"], rej = rec[slot + "_rej"];
       return `${slot === "morning" ? "☀️" : "🌙"} ${s.label}: ` +
         (st === "done" ? (rec[slot + "_note"] ? `выпито ✓ — ${rec[slot + "_note"]}` : `выпито в ${rec[slot]} ✓`) :
-         st === "late" ? `выпито в ${rec[slot]}, поздно — подтверждено (запрос ${fmt(rec[slot + "_late"])})` :
-         st === "pending" ? `выпила в ${req.took}, ждёт подтверждения` :
-         st === "missed" ? (rej ? `пропущено ✗ (запрос «выпила в ${rej.took}» отклонён)` : "пропущено ✗") :
+         st === "late" ? `выпито позже — подтверждено (запрос ${fmt(rec[slot + "_late"])})` :
+         st === "pending" ? `выпила позже (запрос ${fmt(req.at)}), ждёт подтверждения` :
+         st === "missed" ? (rej ? `пропущено ✗ (запрос ${fmt(rej.at)} отклонён)` : "пропущено ✗") :
          st === "open" ? "окно открыто" : "ещё не время") +
         (canRequestLate(SEL, slot, now) && !SAVING ? `<br><button data-late="${slot}">Выпила позже — попросить подтверждение</button>` : "");
     }).join("<br>");
