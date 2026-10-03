@@ -64,6 +64,16 @@
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .35; }
   .dot.done { background: var(--ok); opacity: 1; } .dot.missed { background: var(--bad); opacity: 1; }
   .dot.late { background: var(--warn); opacity: 1; }
+  .dot.pending { background: transparent; box-shadow: inset 0 0 0 2px var(--warn); opacity: 1; }
+  .slot.pending { background: var(--accent-soft); border-color: transparent; }
+  .req { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .req:first-of-type { border-top: 0; }
+  .req .who { flex: 1 1 100%; }
+  .req button { padding: 8px 14px; font-size: 14px; }
+  .req button.no { background: var(--line); color: var(--ink); }
+  .tools { display: flex; gap: 8px; margin: 4px 0 12px; }
+  .tools button { flex: 1; background: var(--card); color: var(--ink); border: 1px solid var(--line); font-size: 14px; }
+  .badge { font-size: 12px; color: var(--muted); }
   .detail button { margin-top: 8px; padding: 8px 12px; font-size: 14px; }
   .legend { display: flex; gap: 14px; justify-content: center; font-size: 12px; color: var(--muted); margin-top: 10px; }
   .legend .dot { display: inline-block; vertical-align: middle; margin-right: 4px; }
@@ -83,6 +93,8 @@
   <p class="sub" id="today">…</p>
 
   <div class="banner" id="nokey" hidden>Нужен ключ доступа: открой личную ссылку с ключом или вставь его в «Настройки» внизу.</div>
+
+  <div class="card" id="requests" hidden><h2 id="reqtitle">Запросы</h2><div id="reqlist"></div></div>
 
   <div class="banner" id="testbanner" hidden>🧪 Тестовый режим: кнопки работают в любое время, отметки не идут в статистику. <a href="./">Обычный режим</a></div>
 
@@ -114,16 +126,19 @@
       <button id="next" aria-label="Следующий месяц">›</button>
     </div>
     <div class="grid" id="grid"></div>
-    <div class="legend"><span><i class="dot done"></i>выпила</span><span><i class="dot late"></i>поздно</span><span><i class="dot missed"></i>пропуск</span><span><i class="dot"></i>ещё не время</span></div>
+    <div class="legend"><span><i class="dot done"></i>выпила</span><span><i class="dot late"></i>поздно</span><span><i class="dot pending"></i>ждёт</span><span><i class="dot missed"></i>пропуск</span><span><i class="dot"></i>ещё не время</span></div>
     <div class="month-sum" id="monthsum"></div>
     <div class="detail" id="detail">Нажми на день, чтобы увидеть время приёма</div>
   </div>
 
+  <div class="tools"><button id="csv">⬇️ Скачать таблицу (Excel)</button></div>
+
   <details>
-    <summary>Настройки</summary>
+    <summary>Настройки <span class="badge" id="role"></span></summary>
     <p>Ключ доступа (GitHub fine-grained token) хранится только в этом браузере.</p>
     <input id="tok" type="password" placeholder="github_pat_…" autocomplete="off">
     <button id="save">Сохранить ключ</button>
+    <p>Подтверждать запросы «выпила позже» может только устройство проверяющего. Включить на своём телефоне: открыть сайт с <code>?admin=1</code> в конце адреса (выключить — <code>?admin=0</code>).</p>
   </details>
 </main>
 
@@ -149,6 +164,10 @@ function load(k) { try { return localStorage.getItem(k); } catch (e) { return nu
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.get("token")) { store("pill_token", hash.get("token")); history.replaceState(null, "", location.pathname + location.search); }
 let TOKEN = load("pill_token") || "";
+// проверяющий (подтверждает запросы): ?admin=1 — включить на этом устройстве, ?admin=0 — выключить
+const qs = new URLSearchParams(location.search);
+if (qs.has("admin")) { store("pill_admin", qs.get("admin") === "0" ? "" : "1"); qs.delete("admin"); history.replaceState(null, "", location.pathname + (qs.toString() ? "?" + qs : "")); }
+const ADMIN = load("pill_admin") === "1";
 
 // --- время в часовом поясе CFG.tz (не зависит от настроек телефона)
 function nowParts() {
@@ -169,6 +188,7 @@ function slotStatus(log, date, slot, now) {
   const rec = (log[date] || {})[slot];
   if (date === "test") return rec ? "done" : "open";
   if (rec) return (log[date] || {})[slot + "_late"] ? "late" : "done";
+  if ((log[date] || {})[slot + "_req"]) return "pending";
   if (date < now.date) return "missed";
   const s = CFG.slots[slot];
   if (now.h < s.from) return "wait";
@@ -193,38 +213,98 @@ async function fetchLog() {
   const j = await r.json();
   SHA = j.sha; LOG = JSON.parse(b64decode(j.content) || "{}"); LOADED = true;
 }
-// поздняя отметка: только за сегодня и вчера, фиксируем реальное время нажатия
-const LATE_DAYS = 1;
-function canMarkLate(day, slot, now) {
-  return !!TOKEN && LOADED && day >= addDays(now.date, -LATE_DAYS) && day >= CFG.since && slotStatus(LOG, day, slot, now) === "missed";
-}
-async function mark(slot, lateDay) {
-  const now = nowParts();
-  const key = lateDay || dayKey(now);
+// --- запись в log.json: перечитываем файл, меняем день через mutate(rec) и сохраняем (с повтором при конфликте)
+const hhmm = (now) => `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}`;
+async function save(key, mutate, message, okMsg) {
   if (SAVING) return;
-  if (lateDay ? !canMarkLate(lateDay, slot, now) : !TEST && slotStatus(LOG, key, slot, now) !== "open") return;
   SAVING = true; render(); setMsg("Сохраняю…");
   try {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await fetchLog();
-    if (!TEST && (LOG[key] || {})[slot]) { setMsg("Уже отмечено ❤️"); return; }
-    const hm = `${String(now.h).padStart(2, "0")}:${String(now.m).padStart(2, "0")}`;
-    LOG[key] = { ...(LOG[key] || {}), [slot]: hm, ...(lateDay ? { [slot + "_late"]: `${now.date} ${hm}` } : {}) };
-    const sorted = Object.fromEntries(Object.entries(LOG).sort());
-    const r = await fetch(API, {
-      method: "PUT",
-      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({
-        message: `${CFG.slots[slot].label} ${key} ✓${lateDay ? " (поздно)" : ""}`,
-        content: b64encode(JSON.stringify(sorted, null, 2) + "\n"),
-        sha: SHA,
-      }),
-    });
-    if (r.ok) { SHA = (await r.json()).content.sha; LOG = sorted; setMsg("Отмечено ❤️"); render(); return; }
-    if (r.status !== 409) throw new Error(r.status === 401 || r.status === 403 || r.status === 404 ? "Ключ не подходит или нет прав на запись (" + r.status + ")" : "Ошибка сохранения (" + r.status + ")");
-  }
-  throw new Error("Конфликт при сохранении, попробуй ещё раз");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await fetchLog();
+      const rec = { ...(LOG[key] || {}) };
+      const err = mutate(rec);
+      if (err) { setMsg(err); return; }
+      LOG[key] = rec;
+      const sorted = Object.fromEntries(Object.entries(LOG).sort());
+      const r = await fetch(API, {
+        method: "PUT",
+        headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ message, content: b64encode(JSON.stringify(sorted, null, 2) + "\n"), sha: SHA }),
+      });
+      if (r.ok) { SHA = (await r.json()).content.sha; LOG = sorted; setMsg(okMsg); return; }
+      if (r.status !== 409) throw new Error(r.status === 401 || r.status === 403 || r.status === 404 ? "Ключ не подходит или нет прав на запись (" + r.status + ")" : "Ошибка сохранения (" + r.status + ")");
+    }
+    throw new Error("Конфликт при сохранении, попробуй ещё раз");
   } finally { SAVING = false; render(); }
+}
+
+async function mark(slot) {
+  const now = nowParts(), key = dayKey(now);
+  if (!TEST && slotStatus(LOG, key, slot, now) !== "open") return;
+  await save(key, (rec) => {
+    if (!TEST && rec[slot]) return "Уже отмечено ❤️";
+    rec[slot] = hhmm(now);
+  }, `${CFG.slots[slot].label} ${key} ✓`, "Отмечено ❤️");
+}
+
+// выпила позже: запрос (только за сегодня и вчера) -> проверяющий подтверждает или отклоняет
+const LATE_DAYS = 1;
+function canRequestLate(day, slot, now) {
+  return !!TOKEN && LOADED && day >= addDays(now.date, -LATE_DAYS) && day >= CFG.since && slotStatus(LOG, day, slot, now) === "missed";
+}
+async function requestLate(day, slot) {
+  const now = nowParts(), s = CFG.slots[slot];
+  if (!canRequestLate(day, slot, now)) return;
+  let took = prompt(`Во сколько ты выпила ${s.label === "Утро" ? "утренние" : "вечерние"} таблетки ${fmtDay(day)}? (ЧЧ:ММ)`, hhmm(now));
+  if (took === null) return;
+  took = took.trim().replace(/[.\-]/g, ":");
+  if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(took)) { setMsg("Время нужно в формате ЧЧ:ММ, например 21:40", true); return; }
+  took = took.padStart(5, "0");
+  await save(day, (rec) => {
+    if (rec[slot]) return "Уже отмечено";
+    rec[slot + "_req"] = { took, at: `${now.date} ${hhmm(now)}` };
+    delete rec[slot + "_rej"];
+  }, `Запрос: ${s.label} ${day} выпито в ${took}`, "Запрос отправлен — ждём подтверждения 🙏");
+}
+async function review(day, slot, approve) {
+  const now = nowParts(), s = CFG.slots[slot];
+  await save(day, (rec) => {
+    const req = rec[slot + "_req"];
+    if (!req) return "Запрос уже обработан";
+    delete rec[slot + "_req"];
+    if (approve) { rec[slot] = req.took; rec[slot + "_late"] = req.at; rec[slot + "_ok"] = `${now.date} ${hhmm(now)}`; }
+    else rec[slot + "_rej"] = { ...req, by: `${now.date} ${hhmm(now)}` };
+  }, `${approve ? "Подтверждено" : "Отклонено"}: ${s.label} ${day}`, approve ? "Подтверждено ✅" : "Отклонено");
+}
+
+// --- таблица для Excel (CSV: ; и UTF-8 BOM, чтобы русский Excel открыл сразу)
+function csvRows(now) {
+  const rows = [["Дата", "Приём", "Окно", "Статус", "Время приёма", "Когда отмечено", "Подтверждено"]];
+  for (let d = CFG.since; d <= now.date; d = addDays(d, 1)) {
+    const rec = LOG[d] || {};
+    for (const [slot, s] of Object.entries(CFG.slots)) {
+      const st = slotStatus(LOG, d, slot, now), req = rec[slot + "_req"], rej = rec[slot + "_rej"];
+      const win = `${String(s.from).padStart(2, "0")}:00–${String(s.to).padStart(2, "0")}:00`;
+      const row = {
+        done: rec[slot + "_note"] ? ["выпито (отмечено задним числом)", "", rec[slot + "_note"], ""] : ["вовремя", rec[slot], `${d} ${rec[slot]}`, ""],
+        late: ["поздно (подтверждено)", rec[slot], rec[slot + "_late"] || "", rec[slot + "_ok"] || ""],
+        pending: ["ждёт подтверждения", req && req.took, req && req.at, ""],
+        missed: rej ? ["отклонено", rej.took, rej.at, rej.by] : ["пропущено", "", "", ""],
+        open: ["окно открыто", "", "", ""],
+        wait: ["ещё не время", "", "", ""],
+      }[st];
+      rows.push([d, s.label, win, ...row.map((x) => x || "")]);
+    }
+  }
+  return rows;
+}
+function downloadCsv() {
+  const now = nowParts();
+  const text = "﻿" + csvRows(now).map((r) => r.map((x) => /[;"\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x).join(";")).join("\r\n") + "\r\n";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  a.download = `таблетки_${now.date}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
 }
 
 // --- UI
@@ -243,17 +323,33 @@ function render() {
     el.className = "card slot " + (LOADED ? st : "");
     const t = (LOG[key] || {})[slot];
     el.querySelector(".state").textContent = {
-      done: `Выпито в ${t} ✓`,
+      done: (LOG[key] || {})[slot + "_note"] ? "Выпито ✓ (отмечено задним числом)" : `Выпито в ${t} ✓`,
       late: `Отмечено поздно, в ${t}`,
       open: TEST ? "Тест: можно нажать" : `Окно открыто — до ${s.to}:00 осталось ${Math.max(0, (s.to - now.h) * 60 - now.m)} мин`,
       wait: `Откроется в ${String(s.from).padStart(2, "0")}:00`,
       missed: "Пропущено",
+      pending: `Выпила в ${((LOG[key] || {})[slot + "_req"] || {}).took} — ждёт подтверждения`,
     }[st];
     if (!LOADED) el.querySelector(".state").textContent = TOKEN ? "Загрузка…" : "Нужен ключ";
     const btn = el.querySelector("button");
-    btn.hidden = (st === "done" || st === "late") && !TEST;
-    btn.disabled = (st !== "open" && !TEST) || !TOKEN || !LOADED || SAVING;
+    const lateBtn = !TEST && st === "missed" && canRequestLate(key, slot, now);
+    btn.textContent = lateBtn ? "Выпила позже" : "Выпила";
+    btn.hidden = (["done", "late", "pending"].includes(st) || (st === "missed" && !lateBtn)) && !TEST;
+    btn.disabled = (st !== "open" && !lateBtn && !TEST) || !TOKEN || !LOADED || SAVING;
   }
+
+  // запросы «выпила позже»
+  const reqs = [];
+  for (const [d, rec] of Object.entries(LOG)) for (const slot of Object.keys(CFG.slots)) if (d !== "test" && rec[slot + "_req"]) reqs.push([d, slot, rec[slot + "_req"]]);
+  $("requests").hidden = !LOADED || !reqs.length;
+  $("reqtitle").textContent = ADMIN ? "Нужно подтвердить" : "Ждут подтверждения";
+  $("reqlist").innerHTML = reqs.map(([d, slot, r]) => `<div class="req"><span class="who">${slot === "morning" ? "☀️" : "🌙"} <b>${CFG.slots[slot].label}, ${fmtDay(d)}</b> — выпила в <b>${r.took}</b> (запрос ${r.at.slice(0, 10) === d ? "в " + r.at.slice(11) : r.at.slice(11) + ", " + fmtDay(r.at.slice(0, 10))})</span>` +
+    (ADMIN ? `<button data-ok="${d}|${slot}">✓ Подтвердить</button><button class="no" data-no="${d}|${slot}">Отклонить</button>` : "") + `</div>`).join("");
+  $("reqlist").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    const [d, slot] = (b.dataset.ok || b.dataset.no).split("|");
+    review(d, slot, !!b.dataset.ok).catch((e) => setMsg(e.message, true));
+  }));
+  $("role").textContent = ADMIN ? "· проверяющий" : "";
 
   // статистика
   let total = 0, missed = 0;
@@ -277,6 +373,7 @@ function render() {
 let VIEW = null, SEL = null; // VIEW = "YYYY-MM"
 const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
 const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const fmtDay = (d) => `${+d.slice(8)} ${MONTHS_GEN[+d.slice(5, 7) - 1]}`;
 const firstMonth = () => CFG.since.slice(0, 7);
 function shiftMonth(ym, n) {
   const [y, m] = ym.split("-").map(Number), t = y * 12 + (m - 1) + n;
@@ -325,24 +422,29 @@ function renderCalendar(now) {
     const fmt = (v) => { const [d, t] = String(v).split(" "); return d === SEL ? t : `${+d.slice(8)} ${MONTHS_GEN[+d.slice(5, 7) - 1]} в ${t}`; };
     const txt = Object.entries(CFG.slots).map(([slot, s], i) => {
       const st = info ? info.st[i] : "";
+      const req = rec[slot + "_req"], rej = rec[slot + "_rej"];
       return `${slot === "morning" ? "☀️" : "🌙"} ${s.label}: ` +
-        (st === "done" ? `выпито в ${rec[slot]} ✓` : st === "late" ? `отмечено поздно (${fmt(rec[slot + "_late"])})` :
-         st === "missed" ? "пропущено ✗" : st === "open" ? "окно открыто" : "ещё не время") +
-        (canMarkLate(SEL, slot, now) && !SAVING ? `<br><button data-late="${slot}">Выпила, но забыла отметить</button>` : "");
+        (st === "done" ? (rec[slot + "_note"] ? `выпито ✓ — ${rec[slot + "_note"]}` : `выпито в ${rec[slot]} ✓`) :
+         st === "late" ? `выпито в ${rec[slot]}, поздно — подтверждено (запрос ${fmt(rec[slot + "_late"])})` :
+         st === "pending" ? `выпила в ${req.took}, ждёт подтверждения` :
+         st === "missed" ? (rej ? `пропущено ✗ (запрос «выпила в ${rej.took}» отклонён)` : "пропущено ✗") :
+         st === "open" ? "окно открыто" : "ещё не время") +
+        (canRequestLate(SEL, slot, now) && !SAVING ? `<br><button data-late="${slot}">Выпила позже — попросить подтверждение</button>` : "");
     }).join("<br>");
-    $("detail").innerHTML = `<b>${+SEL.slice(8)} ${MONTHS_GEN[+SEL.slice(5, 7) - 1]}</b><br>${txt}`;
-    $("detail").querySelectorAll("button[data-late]").forEach((b) => b.addEventListener("click", () => {
-      const s = CFG.slots[b.dataset.late];
-      if (confirm(`Отметить «${s.label}» за ${+SEL.slice(8)} ${MONTHS_GEN[+SEL.slice(5, 7) - 1]} как выпитое с опозданием?`))
-        mark(b.dataset.late, SEL).catch((e) => setMsg(e.message, true));
-    }));
+    $("detail").innerHTML = `<b>${fmtDay(SEL)}</b><br>${txt}`;
+    $("detail").querySelectorAll("button[data-late]").forEach((b) => b.addEventListener("click", () =>
+      requestLate(SEL, b.dataset.late).catch((e) => setMsg(e.message, true))));
   }
 }
 $("prev").addEventListener("click", () => { VIEW = shiftMonth(VIEW, -1); render(); });
 $("next").addEventListener("click", () => { VIEW = shiftMonth(VIEW, 1); render(); });
 
 document.querySelectorAll("button[data-slot]").forEach((b) =>
-  b.addEventListener("click", () => mark(b.dataset.slot).catch((e) => setMsg(e.message, true))));
+  b.addEventListener("click", () => {
+    const now = nowParts(), slot = b.dataset.slot;
+    (!TEST && slotStatus(LOG, now.date, slot, now) === "missed" ? requestLate(now.date, slot) : mark(slot)).catch((e) => setMsg(e.message, true));
+  }));
+$("csv").addEventListener("click", () => { if (!LOADED) return setMsg("Сначала нужны данные (ключ)", true); downloadCsv(); });
 $("save").addEventListener("click", () => {
   TOKEN = $("tok").value.trim(); store("pill_token", TOKEN); $("tok").value = "";
   setMsg(TOKEN ? "Ключ сохранён" : "Ключ удалён"); LOADED = false; LOG = {}; refresh();
